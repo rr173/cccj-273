@@ -4,6 +4,7 @@
 复核所必需的原行，生成交付包（含仓主范围清单），并提供离线复算入口。
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PACKAGE_FORMAT = "po-audit-package/1"
+DISPOSITION_FORMAT = "po-audit-dispositions/1"

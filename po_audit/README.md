@@ -65,6 +65,65 @@ python3 -m po_audit.whreport --warehouse /tmp/wh --doc-row-id D-000001
 
 运行测试：`python3 -m unittest discover -s tests -v`
 
+## 差异处置清单（跨快照持续跟进）
+
+逐单报告回答"这一单此刻有什么差异"，差异处置清单则回答"哪些差异还没处理完、
+之前怎么处理过"。它运行在**完整仓可信侧**，对点名的单据物理ID复用同一份
+`compute_report` 重算核账事实，不改动切片、逐单报告与离线复算的任何既有行为。
+
+### 标识与生命周期
+
+- **稳定自然键 → 确定性ID**：单据级差异键为 `(supplier, doc_no, kind)`；项目级
+  为 `(supplier, doc_no, item_row_id, kind)`。`discrepancy_id` 由自然键规范哈希
+  生成（`DSP-` 前缀），跨快照稳定。项目级以**物理行ID**定位，因此只影响一个
+  项目的事实变化不会重置同单其他项目的处置。
+- **事实指纹**：每项保存相关核账事实（数量、到货/挂起物理ID集合等）的 SHA-256。
+  - 指纹不变 → 处置状态与说明原样保留；同一快照重复刷新完全幂等，不新增项、
+    不重置处置、不追加事件；
+  - 指纹变化（差异仍在）→ 重新置为 `open`，旧处置以 `disposition`/`reopened`
+    事件保留在历史中可查；
+  - 差异不再存在 → 置 `active=false` 移出当前清单，ledger 与完整事件历史保留；
+  - 差异在后续快照再次出现 → **同一 discrepancy_id 复活**为 open，全部历史保留。
+- 差异种类（与报告事实一一对应、可并存）：单据级 `duplicate_doc_number`、
+  `empty_document`、`document_suspended`；项目级 `short`、`over`、
+  `item_suspended`。
+- 处置状态受控词汇：`open` / `in_progress` / `resolved` / `dismissed`，
+  可附自由文本说明；已移出当前清单的差异禁止再登记处置（退出码 21）。
+- 历史点名过、在新快照中整体消失的单据报 `missing_doc_row_ids`（保留原处置、
+  不造新项）；从未出现过的物理ID报 `unknown_doc_row_ids`（退出码 23）。
+- 状态文件格式 `po-audit-dispositions/1`，原子替换写入。
+
+### 快速开始（多快照）
+
+```bash
+# 1. 生成可复现的三版仓快照夹具（含 evolution.json 期望事实）
+python3 -m po_audit.snapfix --out /tmp/snaps
+
+# 2. 用各快照刷新同一份处置清单（也可用 --doc-row-id 逐单点名）
+python3 -m po_audit.dispositions refresh --warehouse /tmp/snaps/snap-v1 \
+    --state /tmp/disp.json --requests /tmp/snaps/requests.json
+python3 -m po_audit.dispositions refresh --warehouse /tmp/snaps/snap-v2 \
+    --state /tmp/disp.json --requests /tmp/snaps/requests.json
+python3 -m po_audit.dispositions refresh --warehouse /tmp/snaps/snap-v3 \
+    --state /tmp/disp.json --requests /tmp/snaps/requests.json
+
+# 3. 当前清单（默认仅 active）/ 全量历史 / 按状态或单据过滤
+python3 -m po_audit.dispositions list --state /tmp/disp.json
+python3 -m po_audit.dispositions list --state /tmp/disp.json --all
+python3 -m po_audit.dispositions list --state /tmp/disp.json --status resolved
+
+# 4. 登记处置状态与说明；查看单项完整记录与事件历史
+python3 -m po_audit.dispositions note --state /tmp/disp.json \
+    --discrepancy-id DSP-xxxxxxxxxxxxxxxx --status in_progress --note "供应商承诺补发"
+python3 -m po_audit.dispositions show    --state /tmp/disp.json --discrepancy-id DSP-...
+python3 -m po_audit.dispositions history --state /tmp/disp.json --discrepancy-id DSP-...
+```
+
+处置清单 CLI 退出码：`0` 成功；`20` 状态/仓装载错误；`21` 差异ID不存在或已移出
+当前清单；`22` 非法处置状态；`23` 刷新含从未出现过的单据物理ID。
+夹具再生成逐字节稳定（测试 `test_regenerate_fixture_is_byte_stable` 保证），
+`evolution.json` 给出每版期望 active 集合与版本间期望动作，可直接复现验证。
+
 ## 交付包格式
 
 ```
@@ -119,13 +178,16 @@ package/
 ```
 po_audit/
   po_audit/
-    model.py       四表模式、行校验、规范哈希
-    warehouse.py   完整仓装载、一次性索引、必要范围计算
-    report.py      复核报告计算（仓侧与离线共用）
-    slicer.py      切片器：许可检查、拒发、交付包与范围清单
-    offline.py     离线复算入口：检验 + 重算报告
-    whreport.py    仓侧参照报告
-    fixtures.py    可生成夹具
+    model.py        四表模式、行校验、规范哈希
+    warehouse.py    完整仓装载、一次性索引、必要范围计算
+    report.py       复核报告计算（仓侧与离线共用）
+    slicer.py       切片器：许可检查、拒发、交付包与范围清单
+    offline.py      离线复算入口：检验 + 重算报告
+    whreport.py     仓侧参照报告
+    fixtures.py     可生成单仓夹具
+    dispositions.py 差异处置清单：跨快照刷新、处置状态与事件历史
+    snapfix.py      可复现的三版多快照夹具（处置清单验证用）
   tests/test_po_audit.py
+  tests/test_dispositions.py
   README.md
 ```
